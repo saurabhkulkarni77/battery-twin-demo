@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Battery Multi-Scale Digital Twin — Concept Demo</title>
+<style>
+  :root { --bg:#0b1220; --card:#121c30; --line:#22314f; --txt:#dbe6f5; --dim:#8fa6c4;
+          --acc:#38bdf8; --acc2:#fbbf24; --good:#34d399; --bad:#f87171; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+         font-family:ui-sans-serif,system-ui,"Segoe UI",Roboto,Arial,sans-serif; }
+  header { padding:18px 22px 10px; }
+  header h1 { margin:0; font-size:22px; letter-spacing:.4px; }
+  header h1 .thin { color:var(--acc); font-weight:300; }
+  header .sub { color:var(--dim); margin-top:4px; font-size:13px; max-width:1000px; }
+  .wrap { display:grid; grid-template-columns:300px 1fr; gap:14px; padding:10px 22px 22px; }
+  @media (max-width:900px){ .wrap{ grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .card h2 { margin:0 0 4px; font-size:13px; letter-spacing:2px; color:var(--acc); }
+  .card h2 .n { color:var(--dim); }
+  .card .cap { color:var(--dim); font-size:12px; margin-bottom:10px; }
+  .views { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:1100px){ .views{ grid-template-columns:1fr; } }
+  canvas { width:100%; display:block; }
+  .ctl { margin:13px 0; }
+  .ctl label { display:flex; justify-content:space-between; font-size:13px; margin-bottom:4px; }
+  .ctl label b { color:var(--acc2); font-weight:600; }
+  .ctl .scale { color:var(--dim); font-size:11px; letter-spacing:1px; margin-top:10px; }
+  input[type=range]{ width:100%; accent-color:var(--acc); }
+  .stats { display:flex; flex-wrap:wrap; gap:8px 16px; font-size:13px; margin-top:8px; }
+  .stats div span { color:var(--dim); display:block; font-size:10px; letter-spacing:1.5px; }
+  .stats div b { font-size:16px; font-weight:600; }
+  .meter-row { display:grid; grid-template-columns:170px 1fr 1fr 1fr; gap:8px; align-items:center;
+               font-size:12px; margin:5px 0; }
+  .meter-row .k { color:var(--txt); }
+  .bar { background:#0a0f1c; border:1px solid var(--line); border-radius:5px; height:14px; position:relative; }
+  .bar i { position:absolute; inset:0; right:auto; border-radius:4px; background:var(--acc); }
+  .bar em { position:absolute; right:6px; top:0; font-style:normal; font-size:10px; line-height:14px; color:var(--txt); }
+  .meter-head { display:grid; grid-template-columns:170px 1fr 1fr 1fr; gap:8px; color:var(--dim);
+                font-size:11px; letter-spacing:1.5px; margin-bottom:4px; }
+  footer { padding:0 22px 26px; color:var(--dim); font-size:12px; max-width:1100px; }
+  footer summary { cursor:pointer; color:var(--acc); }
+  footer pre { white-space:pre-wrap; font-size:11.5px; color:var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>BATTERY MULTI-SCALE TWIN <span class="thin">// FROM MOLECULES TO PACK LIFE</span></h1>
+  <div class="sub">Concept demo for the proposal <i>Manufacturing Memory Across Scales and Stages</i>.
+  Move an upstream knob — binder chemistry, drying, calendering — and watch its effect travel
+  electrode → cell → pack → service life. Companion to the HydroTwin / TwinView digital twin work.</div>
+</header>
+
+<div class="wrap">
+  <div class="card" id="controls">
+    <h2>PROCESS KNOBS</h2>
+    <div class="cap">Inputs at the material and electrode manufacturing scales (BEACONS-style pilot line).</div>
+
+    <div class="scale">MATERIAL SCALE (MD INPUTS)</div>
+    <div class="ctl"><label>Binder–particle adhesion <b id="v_adh"></b></label>
+      <input type="range" id="adh" min="0.5" max="1.5" step="0.01" value="1.0"></div>
+    <div class="ctl"><label>Binder content <b id="v_bin"></b></label>
+      <input type="range" id="bin" min="2" max="6" step="0.1" value="3.5"></div>
+
+    <div class="scale">ELECTRODE SCALE (PROCESS)</div>
+    <div class="ctl"><label>Drying rate <b id="v_dry"></b></label>
+      <input type="range" id="dry" min="0.5" max="2" step="0.01" value="1.0"></div>
+    <div class="ctl"><label>Calendering pressure <b id="v_cal"></b></label>
+      <input type="range" id="cal" min="50" max="250" step="1" value="150"></div>
+    <div class="ctl"><label>Particle size D50 <b id="v_psd"></b></label>
+      <input type="range" id="psd" min="4" max="14" step="0.1" value="9"></div>
+
+    <div class="scale">USE SCALE (DUTY)</div>
+    <div class="ctl"><label>Average charge rate <b id="v_crate"></b></label>
+      <input type="range" id="crate" min="0.5" max="2" step="0.05" value="1.0"></div>
+
+    <div class="cap" style="margin-top:14px">Every view on this page recomputes from these six
+    numbers through the surrogate chain described in the model notes below.</div>
+  </div>
+
+  <div>
+    <div class="views">
+      <div class="card">
+        <h2><span class="n">SCALE 1 ·</span> ELECTRODE MICROSTRUCTURE</h2>
+        <div class="cap">Schematic particle packing after drying and calendering (DEM/FEM stand-in).</div>
+        <canvas id="electrode" height="240"></canvas>
+        <div class="stats">
+          <div><span>POROSITY ε</span><b id="s_eps"></b></div>
+          <div><span>TORTUOSITY τ</span><b id="s_tau"></b></div>
+          <div><span>BINDER MIGRATION</span><b id="s_mig"></b></div>
+          <div><span>CONDUCTIVITY FACTOR</span><b id="s_sig"></b></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span class="n">SCALE 2 ·</span> CELL</h2>
+        <div class="cap">Discharge curves from the cell model (PyBaMM stand-in), 0.2C and 2C.</div>
+        <canvas id="cell" height="240"></canvas>
+        <div class="stats">
+          <div><span>CAPACITY</span><b id="s_cap"></b></div>
+          <div><span>2C RETENTION</span><b id="s_rate"></b></div>
+          <div><span>DC RESISTANCE</span><b id="s_res"></b></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span class="n">SCALE 3 ·</span> PACK (96 CELLS)</h2>
+        <div class="cap">One production batch: each cell sampled from the process spread the chain predicts.</div>
+        <canvas id="pack" height="240"></canvas>
+        <div class="stats">
+          <div><span>MEAN CELL</span><b id="s_mean"></b></div>
+          <div><span>SPREAD (σ)</span><b id="s_std"></b></div>
+          <div><span>WEAKEST CELL</span><b id="s_min"></b></div>
+          <div><span>USABLE PACK</span><b id="s_pack"></b></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span class="n">SCALE 4 ·</span> SERVICE LIFE</h2>
+        <div class="cap">Capacity retention band across the batch, and pack reliability (Weibull).</div>
+        <canvas id="life" height="240"></canvas>
+        <div class="stats">
+          <div><span>MEDIAN RUL (TO 80%)</span><b id="s_rul"></b></div>
+          <div><span>RUL P10 – P90</span><b id="s_rulband"></b></div>
+          <div><span>RELIABILITY @ 8 YR</span><b id="s_rel"></b></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h2>MANUFACTURING MEMORY METER</h2>
+      <div class="cap">Share of output variance each knob explains at each scale, computed live from the
+      surrogate chain (240-point Latin-hypercube sample, correlation based). A knob whose bar survives to
+      service life is manufacturing memory; a knob whose bar dies was erased by a downstream stage.</div>
+      <div class="meter-head"><div>KNOB</div><div>AT ELECTRODE (τ)</div><div>AT CELL (CAPACITY)</div><div>AT LIFE (RUL)</div></div>
+      <div id="meter"></div>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <details>
+    <summary>Model notes — what is real, what is a stand-in</summary>
+    <pre>CONCEPT DEMO. All numbers on this page are computed live in your browser by a small
+surrogate chain written for this demo (see app.js). The chain mimics the structure of the
+proposed MD → DEM → FEM → cell → pack workflow; it is NOT validated simulation output.
+
+Electrode:  porosity ε = 0.62 − 0.0016·P − 0.012·B + 0.03·(D−1) − 0.004·(D50−9)
+            binder migration M grows with drying rate, falls with adhesion
+            tortuosity τ = ε^(−0.55) · (1 + 0.35·M)   (Bruggeman-style)
+Cell:       transport quality T = ε/τ; utilization U = T/(T+0.06)
+            capacity Q = 3.40 · U^0.30 · (0.86 + 0.14·S) Ah, S = conductivity factor
+Pack:       96 cells, per-cell porosity jitter σ from drying/calendering uniformity;
+            usable pack = 96 × 5th-percentile cell capacity (series-string limit)
+Life:       per-cell fade to 80% (RUL) from U, adhesion, migration and charge rate;
+            reliability R(t) = exp(−(t/η)^2.4), η set by the batch median RUL
+Memory:     variance shares from a 240-point Latin-hypercube sweep of the six knobs,
+            squared Pearson correlation, normalized — genuinely recomputed per visit,
+            not stored numbers.
+
+In the full system each stand-in is replaced by the real model: LAMMPS (MD laws),
+Yade/LIGGGHTS (DEM), FEniCSx + TauFactor (FEM/transport), PyBaMM (cell), and
+physics-informed neural operators trained on that chain, exported to ONNX.</pre>
+  </details>
+  <p>Built as a starting concept for discussion. Simulated data only; BEACONS pilot-line
+  measurements slot into the same views as validation when available.</p>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
