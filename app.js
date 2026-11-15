@@ -1,6 +1,20 @@
 "use strict";
 /* Multi-scale battery twin — concept demo surrogate chain.
-   Every number is computed here, live, from the six knob values. */
+   Every number is computed here, live, from the six knob values.
+
+   Revision (Nov 2026): the electrode scale now follows the time-dependent
+   deep-learning manufacturing model of Galvez-Aranda et al., Adv. Energy
+   Mater. 2024, 14, 2400376 (DOI 10.1002/aenm.202400376) — a CNN time-series
+   surrogate trained on CGPD + DEM data (ARTISTIC project) that predicts the
+   3D microstructure frame by frame during calendering from the compression
+   degree (CD), including the spring-back (elastic recovery) when the roll
+   pressure is released. This demo keeps stand-in physics, but adopts the
+   paper's structure: CD as the calendering control variable, a process-time
+   axis with a compression phase and a relaxation phase, the four phases
+   AM / CBD / pores / void, functional metrics (porosity, tortuosity,
+   diffusivity proxy, contact) derived from the microstructure rather than
+   fitted, the RELAXED microstructure as what flows downstream, and a
+   quasi-real-time inverse-design scan over CD. */
 
 // ---------- deterministic RNG (stable pack sampling per knob set) ----------
 function mulberry32(seed) {
@@ -21,14 +35,42 @@ function gauss(rng) { // Box-Muller
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 
 // ---------- surrogate chain ----------
-// knobs: adh (0.5-1.5), bin wt% (2-6), dry (0.5-2), cal MPa (50-250), psd um (4-14), crate (0.5-2)
-function electrode(k, epsJitter = 0) {
-  let eps = 0.62 - 0.0016 * k.cal - 0.012 * k.bin + 0.03 * (k.dry - 1) - 0.004 * (k.psd - 9) + epsJitter;
-  eps = clamp(eps, 0.15, 0.65);
+// knobs: adh (0.5-1.5), bin wt% (2-6), dry (0.5-2), cal = CD % (20-50), psd um (4-14), crate (0.5-2)
+const NSTEPS = 28, PRESS_END = 20; // time frames: 0..20 compression ramp, 21..28 spring-back release
+
+function driedState(k, epsJitter = 0) {
+  // porosity of the dried (uncalendered) electrode — the state the calendering TS starts from
+  const epsDry = clamp(0.62 - 0.012 * k.bin + 0.03 * (k.dry - 1) - 0.004 * (k.psd - 9) + epsJitter, 0.2, 0.68);
   const mig = clamp(0.22 + 0.38 * (k.dry - 0.5) / 1.5 - 0.18 * (k.adh - 0.5), 0, 1);
-  const tau = Math.pow(eps, -0.55) * (1 + 0.35 * mig);
-  const sig = clamp(Math.pow(1 - eps, 1.4) * (0.55 + 0.45 * k.adh) * (1 - 0.25 * mig), 0.05, 1.2);
-  return { eps, mig, tau, sig };
+  return { epsDry, mig };
+}
+function calenderSeries(k, epsJitter = 0) {
+  // Time series of the calendering step, structured after the paper:
+  // thickness h(t) (relative to dried = 1) under a CD ramp, then spring-back.
+  // Solid volume is conserved: (1 - eps) * h = const = (1 - epsDry).
+  const { epsDry, mig } = driedState(k, epsJitter);
+  const CD = k.cal / 100;
+  // spring-back recovers a fraction of the imposed compression; stiffer,
+  // better-bonded coatings (high adhesion, more binder) spring back less.
+  const sbFrac = clamp(0.30 - 0.10 * (k.adh - 1) - 0.03 * (k.bin - 3.5), 0.10, 0.45);
+  const steps = [];
+  for (let t = 0; t <= NSTEPS; t++) {
+    let h;
+    if (t <= PRESS_END) h = 1 - CD * (t / PRESS_END);
+    else h = (1 - CD) + sbFrac * CD * (1 - Math.exp(-(t - PRESS_END) / 3));
+    const eps = clamp(1 - (1 - epsDry) / h, 0.05, 0.68);
+    const tau = Math.pow(eps, -0.55) * (1 + 0.35 * mig);
+    steps.push({ t, h, eps, tau });
+  }
+  const fin = steps[NSTEPS], load = steps[PRESS_END];
+  return { steps, epsDry, mig, sbFrac, CD, hCal: fin.h, epsLoad: load.eps, eps: fin.eps, tau: fin.tau };
+}
+function electrode(k, epsJitter = 0) {
+  // What flows downstream is the RELAXED microstructure (after spring-back),
+  // exactly as in the paper: h^cal and its porosity/tortuosity.
+  const s = calenderSeries(k, epsJitter);
+  const sig = clamp(Math.pow(1 - s.eps, 1.4) * (0.55 + 0.45 * k.adh) * (1 - 0.25 * s.mig), 0.05, 1.2);
+  return { eps: s.eps, mig: s.mig, tau: s.tau, sig, series: s };
 }
 function cellFrom(k, el) {
   const T = el.eps / el.tau;
@@ -46,7 +88,7 @@ function rulYears(k, el, cell) {
 }
 function packSample(k, n = 96, seed = 20261113) {
   const rng = mulberry32(seed);
-  const sigmaP = 0.010 + 0.014 * (k.dry - 0.5) / 1.5 + 0.010 * (1 - (k.cal - 50) / 200);
+  const sigmaP = 0.010 + 0.014 * (k.dry - 0.5) / 1.5 + 0.008 * (1 - (k.cal - 20) / 30);
   const cells = [];
   for (let i = 0; i < n; i++) {
     const el = electrode(k, gauss(rng) * sigmaP);
@@ -66,6 +108,8 @@ const pct = (arr, p) => {
 
 // ---------- state ----------
 const $ = id => document.getElementById(id);
+let tIdx = NSTEPS; // current calendering time frame shown in the electrode view
+let playing = false, playTimer = null;
 function readKnobs() {
   return { adh: +$("adh").value, bin: +$("bin").value, dry: +$("dry").value,
            cal: +$("cal").value, psd: +$("psd").value, crate: +$("crate").value };
@@ -74,20 +118,23 @@ function fmtLabels(k) {
   $("v_adh").textContent = k.adh.toFixed(2) + "×";
   $("v_bin").textContent = k.bin.toFixed(1) + " wt%";
   $("v_dry").textContent = k.dry.toFixed(2) + "×";
-  $("v_cal").textContent = k.cal.toFixed(0) + " MPa";
+  $("v_cal").textContent = k.cal.toFixed(0) + "%";
   $("v_psd").textContent = k.psd.toFixed(1) + " µm";
   $("v_crate").textContent = k.crate.toFixed(2) + "C";
+  $("v_teps").textContent = (+$("teps").value).toFixed(3);
+  $("v_tstep").textContent = "frame " + tIdx + " / " + NSTEPS +
+    (tIdx <= PRESS_END ? " — compression" : " — spring-back (roll released)");
 }
 
 // ---------- canvas helpers ----------
-function fitCanvas(cv) {
+function fitCanvas(cv, height = 240) {
   const r = cv.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   cv.width = Math.max(300, r.width) * dpr;
-  cv.height = 240 * dpr;
+  cv.height = height * dpr;
   const ctx = cv.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return { ctx, W: Math.max(300, r.width), H: 240 };
+  return { ctx, W: Math.max(300, r.width), H: height };
 }
 function axes(ctx, W, H, pad = 34) {
   ctx.strokeStyle = "#22314f"; ctx.lineWidth = 1;
@@ -96,49 +143,100 @@ function axes(ctx, W, H, pad = 34) {
   ctx.stroke();
 }
 
-// ---------- view 1: electrode microstructure (schematic) ----------
+// ---------- view 1: electrode microstructure over calendering time ----------
+// Phases colored as in the paper's Figure 1: AM blue, CBD red, pores yellow, void white.
 function drawElectrode(k, el) {
   const { ctx, W, H } = fitCanvas($("electrode"));
   ctx.clearRect(0, 0, W, H);
+  const s = el.series;
+  const fr = s.steps[tIdx];
   const rng = mulberry32(777);
   const boxX = 18, boxW = W - 36;
-  const fullH = H - 56;
-  const compression = 1 - 0.38 * ((k.cal - 50) / 200); // calendering squeezes the coating
-  const boxH = fullH * compression * (0.55 + 0.45 * el.eps + 0.35);
-  const boxY = 14 + (fullH - boxH) / 2;
+  const frameH = H - 56;                 // fixed grid = dried electrode height (h = 1)
+  const frameY = 14;
+  const boxH = frameH * fr.h;            // coating height at this time frame
+  const boxY = frameY + (frameH - boxH); // coating sits on the collector, void opens above
+  // void region (paper: the empty region on top of the electrode in the grid)
+  ctx.fillStyle = "rgba(226,232,240,0.85)";
+  ctx.fillRect(boxX, frameY, boxW, frameH - boxH);
+  ctx.fillStyle = "#5b6b82"; ctx.font = "10px sans-serif";
+  if (frameH - boxH > 12) ctx.fillText("VOID", boxX + 6, frameY + 12);
+  // pore space tint inside the coating (pores = yellow in the paper)
+  ctx.fillStyle = "rgba(250,204,21,0.13)";
+  ctx.fillRect(boxX, boxY, boxW, boxH);
   // current collector
   ctx.fillStyle = "#3b4a63";
-  ctx.fillRect(boxX, boxY + boxH, boxW, 7);
-  ctx.fillStyle = "#8fa6c4"; ctx.font = "10px sans-serif";
-  ctx.fillText("CURRENT COLLECTOR", boxX, boxY + boxH + 19);
-  // particles
+  ctx.fillRect(boxX, frameY + frameH, boxW, 7);
+  ctx.fillStyle = "#8fa6c4";
+  ctx.fillText("CURRENT COLLECTOR", boxX, frameY + frameH + 19);
+  // particles (AM) — positions fixed per particle, squeezed vertically with h(t)
   const n = 150;
   const parts = [];
   for (let i = 0; i < n; i++) {
     const r = clamp(k.psd * 0.62 * (0.55 + rng() * 0.95), 2.2, 11);
-    parts.push({ x: boxX + r + rng() * (boxW - 2 * r), y: boxY + r + rng() * (boxH - 2 * r), r });
+    const ux = rng(), uy = rng();
+    parts.push({ x: boxX + r + ux * (boxW - 2 * r), y0: r + uy * (frameH - 2 * r), r });
   }
-  // binder bridges (adhesion) + migration gradient near the top
+  const py = p => frameY + frameH - p.y0 * fr.h - p.r * (1 - fr.h) * 0;
+  // binder (CBD) bridges — red, as in the paper
   ctx.lineWidth = 1;
   for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
     const a = parts[i], b = parts[j];
-    const d = Math.hypot(a.x - b.x, a.y - b.y);
+    const d = Math.hypot(a.x - b.x, (a.y0 - b.y0) * fr.h);
     if (d < (a.r + b.r) * 1.25) {
-      const topBias = 1 - (a.y - boxY) / boxH; // 1 at top
+      const topBias = 1 - a.y0 / frameH;
       const alpha = 0.10 + 0.5 * (k.adh - 0.5) * (0.4 + 0.6 * (el.mig * topBias + (1 - el.mig) * 0.5));
-      ctx.strokeStyle = `rgba(251,191,36,${clamp(alpha, 0.04, 0.65)})`;
-      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      ctx.strokeStyle = `rgba(239,68,68,${clamp(alpha, 0.05, 0.6)})`;
+      ctx.beginPath(); ctx.moveTo(a.x, py(a)); ctx.lineTo(b.x, py(b)); ctx.stroke();
     }
   }
   for (const p of parts) {
-    const g = ctx.createRadialGradient(p.x - p.r * 0.3, p.y - p.r * 0.3, p.r * 0.2, p.x, p.y, p.r);
+    const y = py(p);
+    if (y < boxY - p.r || y > frameY + frameH) continue;
+    const g = ctx.createRadialGradient(p.x - p.r * 0.3, y - p.r * 0.3, p.r * 0.2, p.x, y, p.r);
     g.addColorStop(0, "#7dd3fc"); g.addColorStop(1, "#2563eb");
     ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(p.x, y, p.r, 0, 7); ctx.fill();
   }
-  ctx.strokeStyle = "#22314f"; ctx.strokeRect(boxX, boxY, boxW, boxH);
+  ctx.strokeStyle = "#22314f"; ctx.strokeRect(boxX, frameY, boxW, frameH);
   ctx.fillStyle = "#8fa6c4";
-  ctx.fillText(`coating after calendering at ${k.cal.toFixed(0)} MPa — amber links = binder (adhesion ${k.adh.toFixed(2)}×)`, boxX, 12 + 0);
+  ctx.fillText(`h = ${fr.h.toFixed(2)} of dried · ε = ${fr.eps.toFixed(3)} · τ = ${fr.tau.toFixed(2)} at this frame — AM blue · CBD red · pores pale yellow · void white`, boxX, 12);
+}
+
+// ---------- view 1b: calendering time series (thickness, porosity, tortuosity) ----------
+function drawSeries(el) {
+  const { ctx, W, H } = fitCanvas($("tschart"), 118);
+  ctx.clearRect(0, 0, W, H);
+  const s = el.series;
+  const pad = 30, iw = W - pad - 10;
+  const rows = [
+    { key: "h", label: "h(t)", color: "#38bdf8", fmt: v => v.toFixed(2) },
+    { key: "eps", label: "ε(t)", color: "#fbbf24", fmt: v => v.toFixed(3) },
+    { key: "tau", label: "τ(t)", color: "#a78bfa", fmt: v => v.toFixed(2) },
+  ];
+  const rh = (H - 8) / 3;
+  rows.forEach((row, ri) => {
+    const y0 = 4 + ri * rh, vals = s.steps.map(st => st[row.key]);
+    const lo = Math.min(...vals), hi = Math.max(...vals), span = Math.max(hi - lo, 1e-9);
+    const X = t => pad + (t / NSTEPS) * iw;
+    const Y = v => y0 + rh - 4 - ((v - lo) / span) * (rh - 10);
+    // spring-back region shading
+    ctx.fillStyle = "rgba(52,211,153,0.08)";
+    ctx.fillRect(X(PRESS_END), y0 + 1, X(NSTEPS) - X(PRESS_END), rh - 2);
+    ctx.strokeStyle = "#22314f"; ctx.strokeRect(pad, y0 + 1, iw, rh - 2);
+    ctx.beginPath();
+    s.steps.forEach((st, i) => i === 0 ? ctx.moveTo(X(st.t), Y(st[row.key])) : ctx.lineTo(X(st.t), Y(st[row.key])));
+    ctx.strokeStyle = row.color; ctx.lineWidth = 1.6; ctx.stroke();
+    ctx.fillStyle = row.color; ctx.font = "10px sans-serif";
+    ctx.fillText(row.label, 2, y0 + rh / 2 + 3);
+    ctx.fillStyle = "#dbe6f5";
+    const lx = tIdx > NSTEPS - 7 ? X(tIdx) - 34 : X(tIdx) + 4;
+    ctx.fillText(row.fmt(s.steps[tIdx][row.key]), lx, Y(s.steps[tIdx][row.key]) - 3);
+    ctx.beginPath(); ctx.arc(X(tIdx), Y(s.steps[tIdx][row.key]), 3, 0, 7);
+    ctx.fillStyle = "#fff"; ctx.fill();
+  });
+  ctx.fillStyle = "#34d399"; ctx.font = "10px sans-serif";
+  ctx.fillText("spring-back", (30 + (PRESS_END / NSTEPS) * (W - 40)) + 4, H - 2);
 }
 
 // ---------- view 2: cell discharge curves ----------
@@ -244,7 +342,7 @@ function drawLife(k, cells) {
 function lhsSamples(n, seed) {
   const rng = mulberry32(seed);
   const dims = ["adh", "bin", "dry", "cal", "psd", "crate"];
-  const ranges = { adh: [0.5, 1.5], bin: [2, 6], dry: [0.5, 2], cal: [50, 250], psd: [4, 14], crate: [0.5, 2] };
+  const ranges = { adh: [0.5, 1.5], bin: [2, 6], dry: [0.5, 2], cal: [20, 50], psd: [4, 14], crate: [0.5, 2] };
   const cols = {};
   for (const d of dims) {
     const arr = Array.from({ length: n }, (_, i) => (i + rng()) / n);
@@ -281,7 +379,7 @@ function memoryShares() {
   return shares;
 }
 const KNOB_LABELS = { adh: "Binder adhesion (MD)", bin: "Binder content", dry: "Drying rate",
-                      cal: "Calendering pressure", psd: "Particle size D50", crate: "Charge rate (use)" };
+                      cal: "Compression degree CD", psd: "Particle size D50", crate: "Charge rate (use)" };
 function drawMeter() {
   const shares = memoryShares();
   const colors = { adh: "#38bdf8", bin: "#7dd3fc", dry: "#fbbf24", cal: "#f59e0b", psd: "#a78bfa", crate: "#34d399" };
@@ -292,6 +390,19 @@ function drawMeter() {
   }).join("");
 }
 
+// ---------- inverse design: scan CD for a target relaxed porosity ----------
+// The paper's point of the fast surrogate: quasi-real-time optimization loops
+// that predict the calendering conditions to adopt for a desired electrode.
+function recommendCD(k, targetEps) {
+  let best = null;
+  for (let cd = 20; cd <= 50.001; cd += 0.25) {
+    const e = electrode({ ...k, cal: cd }).eps;
+    const err = Math.abs(e - targetEps);
+    if (!best || err < best.err) best = { cd, eps: e, err };
+  }
+  return best;
+}
+
 // ---------- main update ----------
 function update() {
   const k = readKnobs();
@@ -299,6 +410,7 @@ function update() {
   const el = electrode(k);
   const cell = cellFrom(k, el);
   drawElectrode(k, el);
+  drawSeries(el);
   drawCell(k, cell);
   const cells = packSample(k);
   drawPack(cells);
@@ -307,10 +419,18 @@ function update() {
   const mean = qs.reduce((a, b) => a + b) / qs.length;
   const std = Math.sqrt(qs.reduce((a, b) => a + (b - mean) ** 2, 0) / qs.length);
   const ruls = cells.map(c => c.rul);
+  const s = el.series;
   $("s_eps").textContent = el.eps.toFixed(3);
   $("s_tau").textContent = el.tau.toFixed(2);
+  $("s_sb").textContent = (s.sbFrac * s.CD * 100).toFixed(1) + "% of h";
   $("s_mig").textContent = (el.mig * 100).toFixed(0) + "%";
   $("s_sig").textContent = el.sig.toFixed(2);
+  $("loadnote").textContent =
+    `Under load the coating reached ε = ${s.epsLoad.toFixed(3)} at h = ${(1 - s.CD).toFixed(2)}; ` +
+    `after spring-back it relaxed to ε = ${el.eps.toFixed(3)} at h^cal = ${s.hCal.toFixed(2)}. ` +
+    `The relaxed state is what the cell, pack and life views below are built from.`;
+  const rec = recommendCD(k, +$("teps").value);
+  $("s_cdrec").textContent = `CD ≈ ${rec.cd.toFixed(1)}% gives relaxed ε = ${rec.eps.toFixed(3)} (scan of CD 20–50%, computed live)`;
   $("s_cap").textContent = cell.Q.toFixed(2) + " Ah";
   $("s_rate").textContent = cell.rate2C.toFixed(0) + "%";
   $("s_res").textContent = cell.res.toFixed(0) + " mΩ";
@@ -322,8 +442,30 @@ function update() {
   $("s_rulband").textContent = pct(ruls, 0.10).toFixed(1) + " – " + pct(ruls, 0.90).toFixed(1) + " yr";
   $("s_rel").textContent = (rel8 * 100).toFixed(0) + "%";
 }
-for (const id of ["adh", "bin", "dry", "cal", "psd", "crate"])
+for (const id of ["adh", "bin", "dry", "cal", "psd", "crate", "teps"])
   $(id).addEventListener("input", update);
+$("tstep").addEventListener("input", () => {
+  stopPlay();
+  tIdx = +$("tstep").value;
+  update();
+});
+function stopPlay() {
+  playing = false;
+  if (playTimer) { clearInterval(playTimer); playTimer = null; }
+  $("play").textContent = "▶ Play calendering";
+}
+$("play").addEventListener("click", () => {
+  if (playing) { stopPlay(); update(); return; }
+  playing = true;
+  $("play").textContent = "⏸ Pause";
+  if (tIdx >= NSTEPS) tIdx = 0;
+  playTimer = setInterval(() => {
+    tIdx++;
+    $("tstep").value = tIdx;
+    update();
+    if (tIdx >= NSTEPS) stopPlay();
+  }, 130);
+});
 window.addEventListener("resize", update);
 drawMeter();
 update();

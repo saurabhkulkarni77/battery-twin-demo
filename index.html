@@ -39,6 +39,12 @@
   .bar em { position:absolute; right:6px; top:0; font-style:normal; font-size:10px; line-height:14px; color:var(--txt); }
   .meter-head { display:grid; grid-template-columns:170px 1fr 1fr 1fr; gap:8px; color:var(--dim);
                 font-size:11px; letter-spacing:1.5px; margin-bottom:4px; }
+  .timerow { display:flex; align-items:center; gap:10px; margin:6px 0 8px; font-size:12px; color:var(--dim); }
+  .timerow input[type=range]{ flex:1; }
+  .timerow button { background:#0a0f1c; color:var(--acc); border:1px solid var(--line);
+                    border-radius:6px; padding:5px 10px; cursor:pointer; font-size:12px; white-space:nowrap; }
+  .timerow button:hover { border-color:var(--acc); }
+  #tschart { margin-top:6px; }
   footer { padding:0 22px 26px; color:var(--dim); font-size:12px; max-width:1100px; }
   footer summary { cursor:pointer; color:var(--acc); }
   footer pre { white-space:pre-wrap; font-size:11.5px; color:var(--dim); }
@@ -66,8 +72,10 @@
     <div class="scale">ELECTRODE SCALE (PROCESS)</div>
     <div class="ctl"><label>Drying rate <b id="v_dry"></b></label>
       <input type="range" id="dry" min="0.5" max="2" step="0.01" value="1.0"></div>
-    <div class="ctl"><label>Calendering pressure <b id="v_cal"></b></label>
-      <input type="range" id="cal" min="50" max="250" step="1" value="150"></div>
+    <div class="ctl"><label>Compression degree CD <b id="v_cal"></b></label>
+      <input type="range" id="cal" min="20" max="50" step="0.5" value="35"></div>
+    <div class="cap" style="margin-top:-6px">CD = thickness reduction of the dried electrode,
+    the calendering control variable of Galvez-Aranda et al. 2024 (their range: 20–50%).</div>
     <div class="ctl"><label>Particle size D50 <b id="v_psd"></b></label>
       <input type="range" id="psd" min="4" max="14" step="0.1" value="9"></div>
 
@@ -82,14 +90,29 @@
   <div>
     <div class="views">
       <div class="card">
-        <h2><span class="n">SCALE 1 ·</span> ELECTRODE MICROSTRUCTURE</h2>
-        <div class="cap">Schematic particle packing after drying and calendering (DEM/FEM stand-in).</div>
+        <h2><span class="n">SCALE 1 ·</span> ELECTRODE MICROSTRUCTURE — TIME-DEPENDENT</h2>
+        <div class="cap">Calendering as a time series, structured after Galvez-Aranda et al. 2024:
+        the coating compresses as CD ramps up, then springs back when the roll releases.
+        Scrub the frames or press play. Phases as in the paper: AM blue, CBD red, pores pale yellow, void white.</div>
+        <div class="timerow">
+          <button id="play" type="button">▶ Play calendering</button>
+          <input type="range" id="tstep" min="0" max="28" step="1" value="28">
+          <span id="v_tstep"></span>
+        </div>
         <canvas id="electrode" height="240"></canvas>
+        <canvas id="tschart" height="118"></canvas>
         <div class="stats">
-          <div><span>POROSITY ε</span><b id="s_eps"></b></div>
-          <div><span>TORTUOSITY τ</span><b id="s_tau"></b></div>
+          <div><span>POROSITY ε (RELAXED)</span><b id="s_eps"></b></div>
+          <div><span>TORTUOSITY τ (RELAXED)</span><b id="s_tau"></b></div>
+          <div><span>SPRING-BACK Sb</span><b id="s_sb"></b></div>
           <div><span>BINDER MIGRATION</span><b id="s_mig"></b></div>
           <div><span>CONDUCTIVITY FACTOR</span><b id="s_sig"></b></div>
+        </div>
+        <div class="cap" id="loadnote" style="margin-top:8px"></div>
+        <div class="timerow" style="margin-top:6px">
+          <label for="teps" style="font-size:13px">Inverse design — target relaxed porosity ε <b id="v_teps" style="color:var(--acc2)"></b></label>
+          <input type="range" id="teps" min="0.25" max="0.45" step="0.005" value="0.38">
+          <span id="s_cdrec"></span>
         </div>
       </div>
 
@@ -146,9 +169,16 @@
 surrogate chain written for this demo (see app.js). The chain mimics the structure of the
 proposed MD → DEM → FEM → cell → pack workflow; it is NOT validated simulation output.
 
-Electrode:  porosity ε = 0.62 − 0.0016·P − 0.012·B + 0.03·(D−1) − 0.004·(D50−9)
-            binder migration M grows with drying rate, falls with adhesion
-            tortuosity τ = ε^(−0.55) · (1 + 0.35·M)   (Bruggeman-style)
+Electrode:  TIME-DEPENDENT calendering (structure after Galvez-Aranda et al. 2024,
+            see below). Dried porosity ε_dry = 0.62 − 0.012·B + 0.03·(D−1) − 0.004·(D50−9);
+            binder migration M grows with drying rate, falls with adhesion.
+            Calendering time series: thickness h(t) ramps down with the compression
+            degree CD (20–50%), then the roll releases and the coating springs back,
+            recovering a fraction of the compression (less when adhesion/binder are
+            high). Solid volume is conserved, so ε(t) = 1 − (1 − ε_dry)/h(t), and
+            tortuosity τ = ε^(−0.55) · (1 + 0.35·M) (Bruggeman-style) at every frame.
+            The RELAXED state (h^cal, ε, τ after spring-back) is what flows downstream.
+            Inverse design: CD is scanned 20–50% live to hit a target relaxed ε.
 Cell:       transport quality T = ε/τ; utilization U = T/(T+0.06)
             capacity Q = 3.40 · U^0.30 · (0.86 + 0.14·S) Ah, S = conductivity factor
 Pack:       96 cells, per-cell porosity jitter σ from drying/calendering uniformity;
@@ -161,7 +191,26 @@ Memory:     variance shares from a 240-point Latin-hypercube sweep of the six kn
 
 In the full system each stand-in is replaced by the real model: LAMMPS (MD laws),
 Yade/LIGGGHTS (DEM), FEniCSx + TauFactor (FEM/transport), PyBaMM (cell), and
-physics-informed neural operators trained on that chain, exported to ONNX.</pre>
+physics-informed neural operators trained on that chain, exported to ONNX.
+
+TIME-DEPENDENT MODEL REFERENCE (added Nov 2026 at the author's request):
+Galvez-Aranda, Le Dinh, Vijay, Zanotto & Franco, "Time-Dependent Deep Learning
+Manufacturing Process Model for Battery Electrode Microstructure Prediction",
+Adv. Energy Mater. 2024, 14, 2400376. DOI 10.1002/aenm.202400376.
+A CNN time-series model trained on physics-based data (CGPD for slurry/drying,
+DEM for calendering; ARTISTIC project, NMC111 electrodes) predicts the full 3D
+microstructure frame by frame during calendering from a sliding window of past
+frames: voxelized 76 × 76 × 125 grids at 0.4 µm with four phases (pores, CBD,
+AM, void), CD values 20–50%. It is validated on functional metrics computed
+from the predicted microstructures (contact surface area, porosity, diffusivity,
+tortuosity factor) — not trained on them — with R² above 90% at all time frames,
+and it captures the spring-back of the electrode when the compression is
+released. Reported cost: ~15 s per predicted step vs ~47 min for the DEM step,
+which is what makes quasi-real-time optimization loops over calendering
+conditions practical. This demo borrows that structure (CD control, time axis,
+spring-back, relaxed state downstream, CD scan for inverse design); its numbers
+still come from the simplified stand-in relations above, not from the paper's
+trained model.</pre>
   </details>
   <p>Built as a starting concept for discussion. Simulated data only; BEACONS pilot-line
   measurements slot into the same views as validation when available.</p>
