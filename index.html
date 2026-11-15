@@ -55,7 +55,11 @@
   <h1>BATTERY MULTI-SCALE TWIN <span class="thin">// FROM MOLECULES TO PACK LIFE</span></h1>
   <div class="sub">Concept demo for the proposal <i>Manufacturing Memory Across Scales and Stages</i>.
   Move an upstream knob — binder chemistry, drying, calendering — and watch its effect travel
-  electrode → cell → pack → service life. Companion to the HydroTwin / TwinView digital twin work.</div>
+  electrode → cell → pack → service life. Trained-model edition: the life stage is a multi-fidelity neural
+  network (SEI physics fused with NASA Ames aging data, after Kohtz et al. 2022, RaDA Lab) and the electrode
+  stage a simulation-trained neural surrogate structured after Galvez-Aranda et al. (2024). All numbers are
+  computed live in your browser by the trained models — no server. Honest labels in the model notes below.
+  Companion to the HydroTwin / TwinView digital twin work.</div>
 </header>
 
 <div class="wrap">
@@ -84,7 +88,7 @@
       <input type="range" id="crate" min="0.5" max="2" step="0.05" value="1.0"></div>
 
     <div class="cap" style="margin-top:14px">Every view on this page recomputes from these six
-    numbers through the surrogate chain described in the model notes below.</div>
+    numbers through the trained models described in the model notes below.</div>
   </div>
 
   <div>
@@ -106,7 +110,7 @@
           <div><span>TORTUOSITY τ (RELAXED)</span><b id="s_tau"></b></div>
           <div><span>SPRING-BACK Sb</span><b id="s_sb"></b></div>
           <div><span>BINDER MIGRATION</span><b id="s_mig"></b></div>
-          <div><span>CONDUCTIVITY FACTOR</span><b id="s_sig"></b></div>
+          <div><span>TRANSPORT ε/τ</span><b id="s_sig"></b></div>
         </div>
         <div class="cap" id="loadnote" style="margin-top:8px"></div>
         <div class="timerow" style="margin-top:6px">
@@ -118,18 +122,21 @@
 
       <div class="card">
         <h2><span class="n">SCALE 2 ·</span> CELL</h2>
-        <div class="cap">Discharge curves from the cell model (PyBaMM stand-in), 0.2C and 2C.</div>
+        <div class="cap">Capacity at cycle 100 and cycle 500 from the multi-fidelity SOH model (SEI physics + NASA
+        data); resistance from a model trained on NASA impedance (EIS) measurements. Curve shapes are schematic;
+        their extents are the model's capacities.</div>
         <canvas id="cell" height="240"></canvas>
         <div class="stats">
-          <div><span>CAPACITY</span><b id="s_cap"></b></div>
-          <div><span>2C RETENTION</span><b id="s_rate"></b></div>
+          <div><span>CAPACITY @ CYCLE 100</span><b id="s_cap"></b></div>
+          <div><span>CAPACITY @ CYCLE 500</span><b id="s_rate"></b></div>
           <div><span>DC RESISTANCE</span><b id="s_res"></b></div>
         </div>
       </div>
 
       <div class="card">
         <h2><span class="n">SCALE 3 ·</span> PACK (96 CELLS)</h2>
-        <div class="cap">One production batch: each cell sampled from the process spread the chain predicts.</div>
+        <div class="cap">One production batch: each cell is the process spread (per-cell knob jitter) pushed
+        through the same trained electrode and life models.</div>
         <canvas id="pack" height="240"></canvas>
         <div class="stats">
           <div><span>MEAN CELL</span><b id="s_mean"></b></div>
@@ -141,20 +148,27 @@
 
       <div class="card">
         <h2><span class="n">SCALE 4 ·</span> SERVICE LIFE</h2>
-        <div class="cap">Capacity retention band across the batch, and pack reliability (Weibull).</div>
+        <div class="cap">Service life from the SOH trajectory (Kohtz et al. 2022 recipe: SEI-state physics fused
+        with NASA experimental data; RUL = first crossing of 80%). Band and reliability come from the 96 model
+        cells; years assume 100 cycles/year.</div>
         <canvas id="life" height="240"></canvas>
         <div class="stats">
           <div><span>MEDIAN RUL (TO 80%)</span><b id="s_rul"></b></div>
           <div><span>RUL P10 – P90</span><b id="s_rulband"></b></div>
-          <div><span>RELIABILITY @ 8 YR</span><b id="s_rel"></b></div>
+          <div><span>RELIABILITY @ 2 YR</span><b id="s_rel"></b></div>
         </div>
+        <div class="cap" style="margin-top:10px">PARTIAL-SEGMENT SOH LAB — Kohtz et al.'s estimator, live: pick a
+        real held-out NASA example; a Gaussian Process Regression estimates its SOH from only the 3.8–4.1 V window
+        of its charge.</div>
+        <select id="seg_sel" style="background:#0b1220;color:#dbe6f5;border:1px solid #22314f;border-radius:6px;padding:5px 8px;max-width:100%"></select>
+        <div class="cap" id="seg_out" style="margin-top:6px;color:#dbe6f5"></div>
       </div>
     </div>
 
     <div class="card" style="margin-top:14px">
       <h2>MANUFACTURING MEMORY METER</h2>
       <div class="cap">Share of output variance each knob explains at each scale, computed live from the
-      surrogate chain (240-point Latin-hypercube sample, correlation based). A knob whose bar survives to
+      trained models (240-point Latin-hypercube sample, correlation based). A knob whose bar survives to
       service life is manufacturing memory; a knob whose bar dies was erased by a downstream stage.</div>
       <div class="meter-head"><div>KNOB</div><div>AT ELECTRODE (τ)</div><div>AT CELL (CAPACITY)</div><div>AT LIFE (RUL)</div></div>
       <div id="meter"></div>
@@ -164,58 +178,15 @@
 
 <footer>
   <details>
-    <summary>Model notes — what is real, what is a stand-in</summary>
-    <pre>CONCEPT DEMO. All numbers on this page are computed live in your browser by a small
-surrogate chain written for this demo (see app.js). The chain mimics the structure of the
-proposed MD → DEM → FEM → cell → pack workflow; it is NOT validated simulation output.
-
-Electrode:  TIME-DEPENDENT calendering (structure after Galvez-Aranda et al. 2024,
-            see below). Dried porosity ε_dry = 0.62 − 0.012·B + 0.03·(D−1) − 0.004·(D50−9);
-            binder migration M grows with drying rate, falls with adhesion.
-            Calendering time series: thickness h(t) ramps down with the compression
-            degree CD (20–50%), then the roll releases and the coating springs back,
-            recovering a fraction of the compression (less when adhesion/binder are
-            high). Solid volume is conserved, so ε(t) = 1 − (1 − ε_dry)/h(t), and
-            tortuosity τ = ε^(−0.55) · (1 + 0.35·M) (Bruggeman-style) at every frame.
-            The RELAXED state (h^cal, ε, τ after spring-back) is what flows downstream.
-            Inverse design: CD is scanned 20–50% live to hit a target relaxed ε.
-Cell:       transport quality T = ε/τ; utilization U = T/(T+0.06)
-            capacity Q = 3.40 · U^0.30 · (0.86 + 0.14·S) Ah, S = conductivity factor
-Pack:       96 cells, per-cell porosity jitter σ from drying/calendering uniformity;
-            usable pack = 96 × 5th-percentile cell capacity (series-string limit)
-Life:       per-cell fade to 80% (RUL) from U, adhesion, migration and charge rate;
-            reliability R(t) = exp(−(t/η)^2.4), η set by the batch median RUL
-Memory:     variance shares from a 240-point Latin-hypercube sweep of the six knobs,
-            squared Pearson correlation, normalized — genuinely recomputed per visit,
-            not stored numbers.
-
-In the full system each stand-in is replaced by the real model: LAMMPS (MD laws),
-Yade/LIGGGHTS (DEM), FEniCSx + TauFactor (FEM/transport), PyBaMM (cell), and
-physics-informed neural operators trained on that chain, exported to ONNX.
-
-TIME-DEPENDENT MODEL REFERENCE (added Nov 2026 at the author's request):
-Galvez-Aranda, Le Dinh, Vijay, Zanotto & Franco, "Time-Dependent Deep Learning
-Manufacturing Process Model for Battery Electrode Microstructure Prediction",
-Adv. Energy Mater. 2024, 14, 2400376. DOI 10.1002/aenm.202400376.
-A CNN time-series model trained on physics-based data (CGPD for slurry/drying,
-DEM for calendering; ARTISTIC project, NMC111 electrodes) predicts the full 3D
-microstructure frame by frame during calendering from a sliding window of past
-frames: voxelized 76 × 76 × 125 grids at 0.4 µm with four phases (pores, CBD,
-AM, void), CD values 20–50%. It is validated on functional metrics computed
-from the predicted microstructures (contact surface area, porosity, diffusivity,
-tortuosity factor) — not trained on them — with R² above 90% at all time frames,
-and it captures the spring-back of the electrode when the compression is
-released. Reported cost: ~15 s per predicted step vs ~47 min for the DEM step,
-which is what makes quasi-real-time optimization loops over calendering
-conditions practical. This demo borrows that structure (CD control, time axis,
-spring-back, relaxed state downstream, CD scan for inverse design); its numbers
-still come from the simplified stand-in relations above, not from the paper's
-trained model.</pre>
+    <summary>Model notes — datasets, models, measured validation scores</summary>
+    <pre id="modelnotes"></pre>
   </details>
-  <p>Built as a starting concept for discussion. Simulated data only; BEACONS pilot-line
-  measurements slot into the same views as validation when available.</p>
+  <p>Built as a starting concept for discussion. Life-stage models are trained on real NASA Ames aging data fused
+  with SEI physics (Kohtz et al. 2022); the electrode model is simulation-trained and labeled as such in the notes.
+  BEACONS pilot-line measurements slot into the same views as validation when available.</p>
 </footer>
 
+<script src="models.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
